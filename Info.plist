@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Apixa</string>
+    <key>CFBundleDisplayName</key><string>Apixa</string>
+    <key>CFBundleIdentifier</key><string>com.bismita.apixa</string>
+    <key>CFBundleExecutable</key><string>Apixa</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>27.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSRemovableVolumesUsageDescription</key><string>Apixa reads photos from your SD card to stack and rate them.</string>
+    <key>NSDesktopFolderUsageDescription</key><string>Apixa reads photos you choose to stack and rate them.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>Apixa reads photos you choose to stack and rate them.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>Apixa reads photos you choose to stack and rate them.</string>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+.build/
+Apixa.app/
+.DS_Store
+.vscode/
+*.xcodeproj
+.swiftpm/
