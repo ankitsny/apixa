@@ -26,6 +26,13 @@ Builds in Swift 6 language mode with no third-party dependencies. `Compat.swift`
 property wrapper as `@ViewState`, because the macOS 27 SDK makes `@State` a macro whose plugin ships only
 with full Xcode. Once Xcode is installed, `@ViewState` can go back to `@State`.
 
+## Releases
+
+Every push to `main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it builds the app on a
+macOS 27 runner, runs a smoke test, and publishes `Apixa-<version>.zip` as a GitHub release (version = the one in
+`Info.plist` plus the run number, e.g. `1.0.12`). The build is ad-hoc signed and not notarized, so on first launch
+right-click the app and choose Open.
+
 ## How it works
 
 | Step | What |

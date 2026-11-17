@@ -1,0 +1,74 @@
+name: Release
+
+# Every push to main builds Apixa and publishes it as a GitHub release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Apixa needs the macOS 27 SDK; this image has macOS 27 with Xcode 27.
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Set version
+        id: version
+        run: |
+          base=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)
+          version="$base.${{ github.run_number }}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building Apixa $version"
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Smoke test
+        run: |
+          # A headless command that exercises the real binary: parse one recipe and exit.
+          printf 'Smoke Test\nFL | Contrast +2 | Highlights -1 | Saturation +1\n' > "$RUNNER_TEMP/recipe.txt"
+          perl -e 'alarm 60; exec @ARGV' Apixa.app/Contents/MacOS/Apixa --importlooks "$RUNNER_TEMP/recipe.txt" "Smoke" --dry | tee "$RUNNER_TEMP/smoke.txt"
+          grep -q "Smoke Test" "$RUNNER_TEMP/smoke.txt"
+          codesign --verify --deep --strict Apixa.app
+
+      - name: Package
+        id: package
+        run: |
+          zip="Apixa-${{ steps.version.outputs.version }}.zip"
+          ditto -c -k --keepParent Apixa.app "$zip"
+          shasum -a 256 "$zip" | tee "$zip.sha256"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Built from ${{ github.sha }}.
+
+          **Install:** download \`${{ steps.package.outputs.zip }}\`, unzip it and move Apixa to Applications. Requires macOS 27 on Apple silicon.
+
+          **First launch:** this build is not notarized by Apple, so macOS will refuse to open it at first. Right-click Apixa, choose Open, then confirm. You only need to do this once.
+          NOTES
+          sed -i '' 's/^          //' "$RUNNER_TEMP/notes.md"
+          gh release create "v$version" "${{ steps.package.outputs.zip }}" "${{ steps.package.outputs.zip }}.sha256" \
+            --title "Apixa $version" --target "${{ github.sha }}" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
