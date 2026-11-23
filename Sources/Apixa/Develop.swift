@@ -26,9 +26,9 @@ enum Develop {
 
     /// Decode a RAW into the cache ahead of time (no develop, no output image), so showing it later
     /// only costs the develop step.
-    static func warm(raw: URL, adjustments adj: Adjustments, maxPixel: Int?) async {
+    static func warm(raw: URL, adjustments adj: Adjustments, maxPixel: Int?, hdr: Bool = false) async {
         await ResourceGate.shared.prepare(raw)
-        _ = await Blocking.run { cachedRaw(raw, adj: adj, maxPixel: maxPixel, draft: false, interactive: false) != nil }
+        _ = await Blocking.run { cachedRaw(raw, adj: adj, maxPixel: maxPixel, draft: false, interactive: false, hdr: hdr) != nil }
     }
 
     /// Apple's auto-enhance (the analysis behind the magic wand in Photos), expressed as Apixa's own
@@ -70,21 +70,29 @@ enum Develop {
 
     /// `interactive`: while a slider is moving. RAW decoder settings that changed since the last decode
     /// are approximated on the cached decode (instant); the caller follows up with an exact render.
+    /// `hdr`: keep highlights above SDR white (for an HDR-capable screen); the result is a half-float,
+    /// extended-range image tagged with its headroom. Edits and looks are unchanged below white.
     static func renderScaled(raw: URL?, jpeg: URL?, useRaw: Bool, adjustments adj: Adjustments,
-                             maxPixel: Int?, draft: Bool, applyCrop: Bool = true, interactive: Bool = false) async -> Rendered? {
+                             maxPixel: Int?, draft: Bool, applyCrop: Bool = true, interactive: Bool = false,
+                             hdr: Bool = false) async -> Rendered? {
         if useRaw, let raw { await ResourceGate.shared.prepare(raw) }
         return await Blocking.run {
             renderSync(raw: raw, jpeg: jpeg, useRaw: useRaw, adj: adj, maxPixel: maxPixel, draft: draft,
-                       applyCrop: applyCrop, interactive: interactive)
+                       applyCrop: applyCrop, interactive: interactive, hdr: hdr)
         }
     }
 
     private static func renderSync(raw: URL?, jpeg: URL?, useRaw: Bool, adj: Adjustments,
-                                   maxPixel: Int?, draft: Bool, applyCrop: Bool, interactive: Bool = false) -> Rendered? {
+                                   maxPixel: Int?, draft: Bool, applyCrop: Bool, interactive: Bool = false,
+                                   hdr: Bool = false) -> Rendered? {
         var image: (CIImage, Double)?
-        if useRaw, let raw { image = cachedRaw(raw, adj: adj, maxPixel: maxPixel, draft: draft, interactive: interactive) }
-        if image == nil, let src = jpeg ?? raw { image = jpegImage(src, adj: adj, maxPixel: maxPixel) }
+        if useRaw, let raw { image = cachedRaw(raw, adj: adj, maxPixel: maxPixel, draft: draft, interactive: interactive, hdr: hdr) }
+        if image == nil, let src = jpeg ?? raw { image = jpegImage(src, adj: adj, maxPixel: maxPixel, hdr: hdr) }
         guard var (img, scale) = image else { return nil }
+        // HDR: edits and looks run on the SDR part (clipped at white, exactly what SDR shows); the
+        // highlights' extra brightness is multiplied back afterwards as a gain, like an HDR gain map.
+        var hdrParts: (sdr: CIImage, hdr: CIImage)?
+        if hdr { let (sdr, full) = HDR.split(img); hdrParts = (sdr, full); img = sdr }
         if let profile = adj.look?.profile {
             // A Picture Profile stands in for the camera; your edits go on top of it.
             img = ProfileEngine.apply(img, profile)
@@ -93,10 +101,12 @@ enum Develop {
             img = common(img, adj)
             if let look = adj.look { img = LookEngine.apply(img, look, isRaw: useRaw && raw != nil) }
         }
+        if let hdrParts { img = HDR.restore(img, hdr: hdrParts.hdr, sdr: hdrParts.sdr) }
         img = geometry(img, adj, applyCrop: applyCrop)
+        scale = scale > 0 ? scale : 1
+        if hdr, let cg = HDR.makeImage(img) { return Rendered(image: cg, scale: scale) }
         guard let cg = RAWDecoder.context.createCGImage(img, from: img.extent.integralInward, format: .RGBA8,
                                                         colorSpace: displayP3) else { return nil }
-        scale = scale > 0 ? scale : 1
         return Rendered(image: cg, scale: scale)
     }
 
@@ -137,6 +147,7 @@ enum Develop {
         var exposure, temperature, tint, contrast, toneMapping, noiseReduction, sharpening: Double
         var dro = 0
         var linear = false
+        var hdr = false
         /// Temperature / tint are ABSOLUTE for RAW (as-shot or look WB, plus your offset), so the
         /// approximation can move between looks with different white balance.
         init(_ a: Adjustments, wb: (k: Double, tint: Double)? = nil) {
@@ -228,9 +239,11 @@ enum Develop {
     private static let inFlight = KeyLocks()
     private static let extendedLinearP3 = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
 
-    private static func cachedRaw(_ url: URL, adj: Adjustments, maxPixel: Int?, draft: Bool, interactive: Bool) -> (CIImage, Double)? {
+    private static func cachedRaw(_ url: URL, adj: Adjustments, maxPixel: Int?, draft: Bool, interactive: Bool,
+                                  hdr: Bool = false) -> (CIImage, Double)? {
         let key = CacheKey(url: url, maxPixel: maxPixel ?? 0, draft: draft)
-        let stage = RawStage(adj, wb: baseWB(url, adj))
+        var stage = RawStage(adj, wb: baseWB(url, adj))
+        stage.hdr = hdr
         if let hit = decodes.exact(key, stage) { return hit }
         if interactive, let near = decodes.latest(key) {
             return (approximate(near.image, from: near.stage, to: stage), near.scale)
@@ -243,7 +256,7 @@ enum Develop {
         if interactive, let near = decodes.latest(key) {
             return (approximate(near.image, from: near.stage, to: stage), near.scale)
         }
-        guard let (img, scale) = rawImage(url, adj: adj, maxPixel: maxPixel, draft: draft) else { return nil }
+        guard let (img, scale) = rawImage(url, adj: adj, maxPixel: maxPixel, draft: draft, hdr: hdr) else { return nil }
         let r = img.extent.integralInward
         guard let cg = RAWDecoder.context.createCGImage(img, from: r, format: .RGBAh, colorSpace: extendedLinearP3) else {
             return (img, scale)
@@ -282,12 +295,18 @@ enum Develop {
 
     // MARK: RAW path — light, colour and detail applied inside the RAW 9 decoder
 
-    private static func rawImage(_ url: URL, adj: Adjustments, maxPixel: Int?, draft: Bool) -> (CIImage, Double)? {
+    /// Chart measurements only (CLI): lens correction moves and shades flat patches.
+    nonisolated(unsafe) static var lensCorrectionOff = false
+
+    private static func rawImage(_ url: URL, adj: Adjustments, maxPixel: Int?, draft: Bool, hdr: Bool = false) -> (CIImage, Double)? {
         guard let f = CIRAWFilter(imageURL: url) else { return nil }
         RAWDecoder.configure(f, url: url)
         let side = max(f.nativeSize.width, f.nativeSize.height)
         if let maxPixel, side > 0 { f.scaleFactor = Float(min(1, Double(maxPixel) / side)) }
         f.isDraftModeEnabled = draft
+        if lensCorrectionOff { f.isLensCorrectionEnabled = false }
+        // HDR: let the decoder keep highlight detail above SDR white (~1 stop on typical Sony RAWs).
+        if hdr { f.extendedDynamicRangeAmount = 2 }
 
         f.exposure = Float(adj.exposure)
         let wb = baseWB(url, adj)
@@ -325,11 +344,15 @@ enum Develop {
     // MARK: JPEG/HEIC path — equivalent Core Image filters
 
     /// Decoded + downscaled JPEG/HEIC, cached so slider moves only re-run the (GPU) filters.
-    private static func jpegBase(_ url: URL, maxPixel: Int?) -> (CIImage, Double)? {
+    private static func jpegBase(_ url: URL, maxPixel: Int?, hdr: Bool = false) -> (CIImage, Double)? {
         let key = CacheKey(url: url, maxPixel: maxPixel ?? 0, draft: false)
-        let stage = RawStage(Adjustments())
+        var stage = RawStage(Adjustments())
+        stage.hdr = hdr
         if let hit = decodes.exact(key, stage) { return hit }
-        guard var img = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else { return nil }
+        // HDR: HLG/PQ HEIFs and gain-map JPEG/HEICs (iPhone, newer cameras) open with their full range.
+        var opts: [CIImageOption: Any] = [.applyOrientationProperty: true]
+        if hdr { opts[.expandToHDR] = true }
+        guard var img = CIImage(contentsOf: url, options: opts) else { return nil }
         let side = max(img.extent.width, img.extent.height)
         var scale = 1.0
         if let maxPixel, side > CGFloat(maxPixel) {
@@ -339,15 +362,18 @@ enum Develop {
             s.scale = Float(scale)
             img = s.outputImage ?? img
         }
-        guard let cg = RAWDecoder.context.createCGImage(img, from: img.extent.integralInward, format: .RGBA8,
-                                                        colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!) else { return (img, scale) }
+        let cg = hdr
+            ? RAWDecoder.context.createCGImage(img, from: img.extent.integralInward, format: .RGBAh, colorSpace: extendedLinearP3)
+            : RAWDecoder.context.createCGImage(img, from: img.extent.integralInward, format: .RGBA8,
+                                               colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!)
+        guard let cg else { return (img, scale) }
         let m = CIImage(cgImage: cg)
         decodes.put(key, stage, m, scale)
         return (m, scale)
     }
 
-    private static func jpegImage(_ url: URL, adj: Adjustments, maxPixel: Int?) -> (CIImage, Double)? {
-        guard let base = jpegBase(url, maxPixel: maxPixel) else { return nil }
+    private static func jpegImage(_ url: URL, adj: Adjustments, maxPixel: Int?, hdr: Bool = false) -> (CIImage, Double)? {
+        guard let base = jpegBase(url, maxPixel: maxPixel, hdr: hdr) else { return nil }
         var img = base.0
         let scale = base.1
         if adj.temperature != 0 || adj.tint != 0 {

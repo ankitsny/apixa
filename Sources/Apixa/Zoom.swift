@@ -252,7 +252,10 @@ final class PanImageView: NSView {
     var image: NSImage? {
         didSet {
             guard image !== oldValue else { return }
-            layer?.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? image
+            let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            // HDR renders carry a content headroom; let the layer show them above SDR white.
+            layer?.preferredDynamicRange = HDR.isHDR(cg) ? .high : .standard
+            layer?.contents = cg ?? image
         }
     }
 

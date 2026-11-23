@@ -152,6 +152,80 @@ enum SelfTest {
             }
             return
         }
+        if let i = args.firstIndex(of: "--hdrtest"), i + 1 < args.count {
+            // SDR vs HDR render of a RAW: headroom tag, highlight range, agreement below white, timing.
+            let raw = URL(fileURLWithPath: args[i + 1])
+            Task { @MainActor in
+                print("screen HDR:", HDR.screenSupportsHDR, NSScreen.screens.map { $0.maximumPotentialExtendedDynamicRangeColorComponentValue })
+                for look in [nil, LookRecipe.presets.first { $0.base == .VV }, LookRecipe.fujifilmRecipes.first] as [LookRecipe?] {
+                    var adj = Adjustments(); adj.look = look
+                    _ = await Develop.renderScaled(raw: raw, jpeg: nil, useRaw: true, adjustments: adj, maxPixel: 2400, draft: false)
+                    _ = await Develop.renderScaled(raw: raw, jpeg: nil, useRaw: true, adjustments: adj, maxPixel: 2400, draft: false, hdr: true)
+                    var t = Date()
+                    guard let sdr = await Develop.renderScaled(raw: raw, jpeg: nil, useRaw: true, adjustments: adj, maxPixel: 2400, draft: false) else { print("sdr failed"); exit(1) }
+                    let tS = Date().timeIntervalSince(t); t = Date()
+                    guard let hdr = await Develop.renderScaled(raw: raw, jpeg: nil, useRaw: true, adjustments: adj, maxPixel: 2400, draft: false, hdr: true) else { print("hdr failed"); exit(1) }
+                    let tH = Date().timeIntervalSince(t)
+                    let ns = NSImage(cgImage: hdr.image, size: NSSize(width: hdr.image.width, height: hdr.image.height))
+                    let back = ns.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                    // Both in linear Display P3 floats.
+                    func floats(_ cg: CGImage) -> [Float] {
+                        let w = cg.width, h = cg.height
+                        var b = [Float](repeating: 0, count: w * h * 4)
+                        let ctx = CGContext(data: &b, width: w, height: h, bitsPerComponent: 32, bytesPerRow: w * 16,
+                                            space: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!,
+                                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+                        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+                        return b
+                    }
+                    let a = floats(sdr.image), b = floats(hdr.image)
+                    var over = 0, maxY: Float = 0, dsum: Float = 0, dmax: Float = 0, n = 0
+                    for p in stride(from: 0, to: min(a.count, b.count), by: 4) {
+                        let y = 0.229 * b[p] + 0.6917 * b[p + 1] + 0.0793 * b[p + 2]
+                        maxY = max(maxY, y)
+                        if y > 1.001 { over += 1; continue }
+                        if y < 0.95 {
+                            // compare in display-encoded terms (0…255 steps)
+                            for c in 0..<3 {
+                                let e = { (v: Float) -> Float in pow(max(0, min(1, v)), 1 / 2.2) * 255 }
+                                let d = abs(e(a[p + c]) - e(b[p + c])); dsum += d; dmax = max(dmax, d); n += 1
+                            }
+                        }
+                    }
+                    print(String(format: "%@: SDR %.0f ms, HDR %.0f ms | headroom tag %.1f (after NSImage %.1f) | brightest %.2f× white (%.2f stops), %.1f%% of pixels above white | below white: mean diff %.2f/255, max %.1f/255",
+                                 look?.name ?? "no look", tS * 1000, tH * 1000, hdr.image.contentHeadroom, back?.contentHeadroom ?? -1,
+                                 maxY, log2(max(maxY, 1e-6)), Double(over) * 400 / Double(b.count), dsum / Float(max(1, n)), dmax))
+                }
+                exit(0)
+            }
+            return
+        }
+        if let i = args.firstIndex(of: "--rendertiff"), i + 2 < args.count {
+            // Apixa's neutral render of a RAW (full size, 16-bit sRGB TIFF).
+            Task { @MainActor in
+                let ok = await ChartFit.renderTIFF(URL(fileURLWithPath: args[i + 1]), to: URL(fileURLWithPath: args[i + 2]))
+                print(ok ? "wrote \(args[i + 2])" : "render failed"); exit(ok ? 0 : 1)
+            }
+            return
+        }
+        if let i = args.firstIndex(of: "--chartfit"), i + 1 < args.count {
+            // Fit Apixa neutral → Sony look tables from a colour-chart RAW rendered by Imaging Edge.
+            let scenes = args[(i + 2)...].filter { !$0.hasPrefix("--") }.map { URL(fileURLWithPath: $0) }
+            Task { @MainActor in
+                setvbuf(stdout, nil, _IOLBF, 0)
+                if ProcessInfo.processInfo.environment["CHART_MODE"] == "mixed" {
+                    _ = await ChartFit.runMixed(chartDirs: args[i + 1].split(separator: ",").map { URL(fileURLWithPath: String($0)) }, scenes: scenes) { print($0) }
+                    exit(0)
+                }
+                if ProcessInfo.processInfo.environment["CHART_MODE"] == "linear" {
+                    await ChartFit.runLinear(chartDirs: args[i + 1].split(separator: ",").map { URL(fileURLWithPath: String($0)) }, scenes: scenes, save: args.contains("--save")) { print($0) }
+                    exit(0)
+                }
+                await ChartFit.run(chartDirs: args[i + 1].split(separator: ",").map { URL(fileURLWithPath: String($0)) }, scenes: scenes, save: args.contains("--save")) { print($0) }
+                exit(0)
+            }
+            return
+        }
         if let i = args.firstIndex(of: "--refexport"), i + 2 < args.count {
             let out = URL(fileURLWithPath: args[i + 1])
             let folders = args[(i + 2)...].filter { !$0.hasPrefix("--") }.map { URL(fileURLWithPath: $0) }

@@ -194,7 +194,33 @@ struct LookRecipe: Codable, Hashable, Identifiable, Sendable {
         ("Noir", "CIPhotoEffectNoir", "High-contrast black and white."),
     ].map { LookRecipe(name: $0.0, group: "Apple Photo Filters", base: .ST, notes: $0.2, appleFilter: $0.1) }
 
-    static let builtIn: [LookRecipe] = presets + sonyAlphaRecipes + appleFilters
+    /// Fujifilm film simulations recreated with Sony Creative Looks, by Veres Deni Alex
+    /// (veresdenialex.com, "Sony JPEG recipes using Creative Looks", free recipes; settings as published).
+    static let fujifilmRecipes: [LookRecipe] = {
+        let g = "Fujifilm Simulations", credit = "Recipe by Veres Deni Alex · veresdenialex.com"
+        return [
+            LookRecipe(name: "Provia", group: g, base: .ST, shadows: -6, sharpnessRange: 1, shiftAB: -0.5, shiftGM: 1,
+                       notes: "Fujifilm Provia: natural, all-round colour.", credit: credit),
+            LookRecipe(name: "Velvia", group: g, base: .VV, contrast: 3, highlights: 2, shadows: -8, saturation: 3, sharpnessRange: 1, shiftAB: 1,
+                       notes: "Fujifilm Velvia: saturated, punchy landscape colour.", credit: credit),
+            LookRecipe(name: "Astia", group: g, base: .PT, contrast: 2, shadows: -9, sharpnessRange: 1, shiftAB: -0.5, shiftGM: 0.5,
+                       notes: "Fujifilm Astia: soft colour and gentle skin tones.", credit: credit),
+            LookRecipe(name: "Classic Chrome", group: g, base: .NT, contrast: 2, highlights: -2, shadows: -9, saturation: -1, sharpnessRange: 1,
+                       shiftAB: -0.5, shiftGM: 1, notes: "Fujifilm Classic Chrome: muted colour with firm contrast.", credit: credit),
+            LookRecipe(name: "Pro Neg Std", group: g, base: .PT, contrast: 1, shadows: -4, fade: 1, saturation: -4, sharpnessRange: 1,
+                       shiftAB: -1, shiftGM: 2, notes: "Fujifilm Pro Neg. Std: soft, low-saturation portrait negative.", credit: credit),
+            LookRecipe(name: "Classic Negative", group: g, base: .FL, contrast: -1, highlights: -2, shadows: -9, fade: 1, saturation: -2,
+                       sharpnessRange: 1, wb: .colorTemp, kelvin: 8400, shiftAB: -7, shiftGM: 1.75, dro: 2,
+                       notes: "Fujifilm Classic Negative: hard-toned colour-negative look.", credit: credit),
+            LookRecipe(name: "Nostalgic Neg", group: g, base: .SH, contrast: 5, highlights: 2, shadows: -7, fade: 1, sharpnessRange: 1,
+                       shiftAB: 1, shiftGM: 1, notes: "Fujifilm Nostalgic Neg: warm, amber-tinted print feel.", credit: credit),
+            LookRecipe(name: "Eterna", group: g, base: .IN, contrast: -7, shadows: -9, saturation: -1, sharpnessRange: 1,
+                       shiftAB: -0.5, shiftGM: 1, notes: "Fujifilm Eterna: low-contrast, muted cinema film.", credit: credit),
+        ]
+    }()
+
+    static let builtIn: [LookRecipe] = presets + fujifilmRecipes + sonyAlphaRecipes + appleFilters
+    static let builtInGroups: [String] = ["Sony Creative Looks", "Fujifilm Simulations", "Sony Alpha Recipes", "Apple Photo Filters"]
 
     /// Totals (look character + recipe), what the sliders show.
     var totalContrast: Int { base.baseContrast + contrast }

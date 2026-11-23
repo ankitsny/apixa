@@ -496,6 +496,7 @@ struct PreviewView: View {
         let adj: Adjustments
         let full: Bool
         let crop: Bool
+        var hdr = false
     }
 
     @ViewState private var rendered: CGImage?
@@ -526,7 +527,7 @@ struct PreviewView: View {
         let previewScale = Double(baseMaxPixel) / originalLongSide
         let full = !store.cropMode && (store.zoom.scale ?? 0) > previewScale * 1.05
         return LoadKey(id: asset.id, raw: asset.isRawOnly || (asset.isPair && store.previewRaw), adj: adj,
-                       full: full, crop: store.cropMode)
+                       full: full, crop: store.cropMode, hdr: hdrOn)
     }
 
     /// The "before" image: no edits, but the same crop/straighten so the two line up.
@@ -534,8 +535,11 @@ struct PreviewView: View {
         var adj = Adjustments()
         adj.crop = store.cropMode ? nil : asset.adjustments.crop
         adj.angle = asset.adjustments.angle
-        return LoadKey(id: asset.id, raw: key.raw, adj: adj, full: false, crop: store.cropMode)
+        return LoadKey(id: asset.id, raw: key.raw, adj: adj, full: false, crop: store.cropMode, hdr: hdrOn)
     }
+
+    /// HDR rendering: switched on, a screen that can show it, and not while marking clipped pixels.
+    private var hdrOn: Bool { store.hdrView && HDR.screenSupportsHDR && !store.cropMode && !store.showClipping }
 
     private var background: (Color, NSColor) {
         switch store.viewerBackground {
@@ -623,8 +627,8 @@ struct PreviewView: View {
                 let frame = CGRect(x: avail.midX - w / 2, y: avail.midY - h / 2, width: w, height: h)
                 let x = frame.minX + frame.width * split
                 ZStack(alignment: .topLeading) {
-                    Image(nsImage: before).resizable().frame(width: w, height: h).offset(x: frame.minX, y: frame.minY)
-                    Image(nsImage: after).resizable().frame(width: w, height: h).offset(x: frame.minX, y: frame.minY)
+                    Image(nsImage: before).resizable().allowedDynamicRange(.high).frame(width: w, height: h).offset(x: frame.minX, y: frame.minY)
+                    Image(nsImage: after).resizable().allowedDynamicRange(.high).frame(width: w, height: h).offset(x: frame.minX, y: frame.minY)
                         .mask(Rectangle().frame(width: max(0, frame.maxX - x), height: h).offset(x: x, y: frame.minY)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading))
                     Rectangle().fill(Color.white).frame(width: 2, height: h).offset(x: x - 1, y: frame.minY)
@@ -664,7 +668,7 @@ struct PreviewView: View {
         // Slider drags: instant approximate render from the cached decode, then exact when idle.
         if editing {
             if let r = await Develop.renderScaled(raw: raw, jpeg: jpeg, useRaw: k.raw, adjustments: k.adj,
-                                                  maxPixel: px, draft: false, applyCrop: !k.crop, interactive: true),
+                                                  maxPixel: px, draft: false, applyCrop: !k.crop, interactive: true, hdr: k.hdr),
                !Task.isCancelled {
                 show(r, k, label)
             }
@@ -674,7 +678,7 @@ struct PreviewView: View {
         // (No quick draft first for a new photo: a RAW 9 draft decode costs nearly as much as the real
         // one (~400 vs ~450 ms), so it only doubled the wait. The thumbnail shows meanwhile.)
         if let r = await Develop.renderScaled(raw: raw, jpeg: jpeg, useRaw: k.raw, adjustments: k.adj,
-                                              maxPixel: px, draft: false, applyCrop: !k.crop), !Task.isCancelled {
+                                              maxPixel: px, draft: false, applyCrop: !k.crop, hdr: k.hdr), !Task.isCancelled {
             show(r, k, label + (k.full ? " · full res" : ""))
             if chrome && !k.full {
                 let box = ImageBox(image: r.image)
@@ -682,12 +686,12 @@ struct PreviewView: View {
                 if !Task.isCancelled { store.scopes = s?.scopes }
             }
             // Idle on this photo: render full resolution in the background so a zoom doesn't wait for it.
-            let fk = LoadKey(id: k.id, raw: k.raw, adj: k.adj, full: true, crop: false)
+            let fk = LoadKey(id: k.id, raw: k.raw, adj: k.adj, full: true, crop: false, hdr: k.hdr)
             if chrome && !k.full && !k.crop && prefetched?.key != fk {
                 try? await Task.sleep(for: .milliseconds(450))
                 guard !Task.isCancelled else { return }
                 if let f = await Develop.renderScaled(raw: raw, jpeg: jpeg, useRaw: k.raw, adjustments: k.adj,
-                                                      maxPixel: nil, draft: false, applyCrop: true) {
+                                                      maxPixel: nil, draft: false, applyCrop: true, hdr: k.hdr) {
                     // Keep it even if this task was superseded by the zoom itself — that zoom wants exactly this.
                     if key == fk { show(f, fk, label + " · full res") }
                     prefetched = (fk, f)
@@ -699,7 +703,7 @@ struct PreviewView: View {
                     guard !Task.isCancelled else { return }
                     let useRaw = n.isRawOnly || (n.isPair && store.previewRaw)
                     guard useRaw, let nraw = n.rawURL else { continue }
-                    await Develop.warm(raw: nraw, adjustments: n.adjustments, maxPixel: baseMaxPixel)
+                    await Develop.warm(raw: nraw, adjustments: n.adjustments, maxPixel: baseMaxPixel, hdr: k.hdr)
                 }
             }
         }
@@ -709,7 +713,7 @@ struct PreviewView: View {
         guard comparing else { return }
         let k = beforeLoadKey
         if let r = await Develop.renderScaled(raw: asset.rawURL, jpeg: asset.jpegURL, useRaw: k.raw, adjustments: k.adj,
-                                              maxPixel: baseMaxPixel, draft: false, applyCrop: !k.crop), !Task.isCancelled {
+                                              maxPixel: baseMaxPixel, draft: false, applyCrop: !k.crop, hdr: k.hdr), !Task.isCancelled {
             before = NSImage(cgImage: r.image, size: NSSize(width: r.image.width, height: r.image.height))
             beforeKey = k
         }
@@ -720,7 +724,7 @@ struct PreviewView: View {
         rendered = cg
         if !store.showClipping { image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)) }
         originalSize = CGSize(width: Double(cg.width) / r.scale, height: Double(cg.height) / r.scale)
-        sourceLabel = label
+        sourceLabel = label + (HDR.isHDR(cg) ? " · HDR" : "")
         loadedKey = k
     }
 
@@ -2264,6 +2268,11 @@ struct PreviewBar: View {
             Toggle(isOn: $store.showClipping) { Label("Clipping", systemImage: "exclamationmark.triangle") }
                 .toggleStyle(.button)
                 .help("Red = blown highlights, blue = crushed shadows (J)")
+            if HDR.screenSupportsHDR {
+                Toggle(isOn: $store.hdrView) { Label("HDR", systemImage: "sun.max") }
+                    .toggleStyle(.button)
+                    .help("Show highlights brighter than white on this screen, as the camera captured them")
+            }
             Menu {
                 Picker("Background", selection: $store.viewerBackground) {
                     ForEach(ViewerBackground.allCases) { Text($0.rawValue).tag($0) }

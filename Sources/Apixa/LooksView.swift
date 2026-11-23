@@ -27,6 +27,54 @@ enum MyLooksStore {
     }
 }
 
+extension LookRecipe {
+    /// Sony's own looks carry their code in the tile badge, so they show just the name.
+    var displayName: String { group == "Sony Creative Looks" ? base.title : name }
+}
+
+/// One group of looks in the grid, with the short chip label and a line describing it.
+struct LookSection: Identifiable {
+    static let favorites = "★ Favorites"
+    let id: String
+    let looks: [LookRecipe]
+
+    var title: String { id == Self.favorites ? "Favorites" : id }
+    var isMine: Bool { id != Self.favorites && !LookRecipe.builtInGroups.contains(id) }
+
+    var chip: String {
+        switch id {
+        case Self.favorites: "Favorites"
+        case "Sony Creative Looks": "Sony Looks"
+        case "Fujifilm Simulations": "Fujifilm"
+        case "Sony Alpha Recipes": "Alpha Recipes"
+        case "Apple Photo Filters": "Apple"
+        default: id
+        }
+    }
+
+    var symbol: String {
+        switch id {
+        case Self.favorites: "star.fill"
+        case "Sony Creative Looks": "camera"
+        case "Fujifilm Simulations": "film"
+        case "Sony Alpha Recipes": "list.bullet.rectangle"
+        case "Apple Photo Filters": "camera.filters"
+        default: looks.allSatisfy(\.isProfile) ? "slider.horizontal.below.square.filled.and.square" : "folder"
+        }
+    }
+
+    var blurb: String {
+        switch id {
+        case Self.favorites: "Looks you starred."
+        case "Sony Creative Looks": "The camera's own looks, as Apixa renders them from your photo."
+        case "Fujifilm Simulations": "Fuji film simulations built from Creative Looks, by Veres Deni Alex. Fuji renders darker: lower Exposure 0.3–0.7 to match."
+        case "Sony Alpha Recipes": "Published on Sony's Alpha Recipes site."
+        case "Apple Photo Filters": "Apple's built-in photo effects; the sliders still work on top."
+        default: looks.allSatisfy(\.isProfile) ? "Your Picture Profile recipes." : "Your looks."
+        }
+    }
+}
+
 extension LibraryStore {
     var allLooks: [LookRecipe] { LookRecipe.builtIn + myLooks }
 
@@ -49,8 +97,9 @@ extension LibraryStore {
         if browsingLooks { stepPhoto(d) } else { moveStack(d) }
     }
 
+    /// ← → step through the looks in view (the chosen group, or every group).
     func moveLook(_ d: Int) {
-        let list = allLooks
+        let list = lookFocus.map(stripLooks(for:)) ?? visibleLooks
         guard !list.isEmpty else { return }
         let i = list.firstIndex { $0.id == lookFocus?.id } ?? 0
         lookFocus = list[(i + d + list.count) % list.count]
@@ -112,7 +161,93 @@ extension LibraryStore {
         return order.map { ($0, map[$0]!) }
     }
 
+    /// Sections of the Looks grid: Favorites, Sony's looks and the built-in recipes, your own groups,
+    /// then Apple's filters.
+    var lookSections: [LookSection] {
+        var out: [LookSection] = []
+        let favs = allLooks.filter { favoriteLooks.contains($0.id) }
+        if !favs.isEmpty { out.append(LookSection(id: LookSection.favorites, looks: favs)) }
+        let groups = lookGroups
+        let rank = { (g: String) -> Int in
+            switch g {
+            case "Sony Creative Looks": 0
+            case "Fujifilm Simulations": 1
+            case "Sony Alpha Recipes": 2
+            case "Apple Photo Filters": 9
+            default: 5
+            }
+        }
+        for (g, looks) in groups.enumerated().sorted(by: { (rank($0.element.0), $0.offset) < (rank($1.element.0), $1.offset) }).map(\.element) {
+            out.append(LookSection(id: g, looks: looks))
+        }
+        return out
+    }
+
+    /// Sections after the group chip and search are applied.
+    var visibleLookSections: [LookSection] {
+        let q = lookSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        return lookSections
+            .filter { lookFilter == "All" ? true : $0.id == lookFilter }
+            .compactMap { sec in
+                guard !q.isEmpty else { return sec }
+                let hit = sec.looks.filter { r in
+                    [r.name, r.notes ?? "", r.credit ?? "", r.group, r.base.title, r.base.rawValue].contains { $0.lowercased().contains(q) }
+                }
+                return hit.isEmpty ? nil : LookSection(id: sec.id, looks: hit)
+            }
+    }
+
+    /// Every look in view, once each, in grid order.
+    var visibleLooks: [LookRecipe] {
+        var seen = Set<String>()
+        return visibleLookSections.flatMap(\.looks).filter { seen.insert($0.id).inserted }
+    }
+
+    /// The looks shown under an enlarged look: its section in view (or its own group).
+    func stripLooks(for r: LookRecipe) -> [LookRecipe] {
+        let secs = visibleLookSections
+        if lookFilter != "All", let s = secs.first(where: { $0.looks.contains { $0.id == r.id } }) { return s.looks }
+        return lookSections.first { $0.id == r.group }?.looks ?? allLooks
+    }
+
+    func toggleFavorite(_ r: LookRecipe) {
+        if favoriteLooks.contains(r.id) { favoriteLooks.remove(r.id) } else { favoriteLooks.insert(r.id) }
+    }
+
+    /// Move one of your looks to another of your groups (or a new one).
+    func moveMyLook(_ r: LookRecipe, to group: String) {
+        guard let i = myLooks.firstIndex(where: { $0.id == r.id }), !group.isEmpty, group != r.group else { return }
+        let wasFav = favoriteLooks.contains(r.id)
+        myLooks[i].group = group
+        if wasFav { favoriteLooks.remove(r.id); favoriteLooks.insert(myLooks[i].id) }
+        MyLooksStore.save(myLooks)
+        statusMessage = "Moved “\(r.name)” to \(group)"
+    }
+
+    /// Rename one of your groups (built-in groups keep their names).
+    func renameLookGroup(_ old: String, to new: String) {
+        let name = new.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, name != old, !LookRecipe.builtInGroups.contains(old) else { return }
+        for i in myLooks.indices where myLooks[i].group == old {
+            let oldID = myLooks[i].id
+            myLooks[i].group = name
+            if favoriteLooks.contains(oldID) { favoriteLooks.remove(oldID); favoriteLooks.insert(myLooks[i].id) }
+        }
+        if lookFilter == old { lookFilter = name }
+        MyLooksStore.save(myLooks)
+        statusMessage = "Renamed group to \(name)"
+    }
+
+    /// Your own groups, for "Move to Group".
+    var myLookGroups: [String] {
+        var seen: [String] = []
+        for r in myLooks where !seen.contains(r.group) { seen.append(r.group) }
+        if !seen.contains("My Looks") { seen.append("My Looks") }
+        return seen
+    }
+
     func deleteMyLook(_ r: LookRecipe) {
+        favoriteLooks.remove(r.id)
         myLooks.removeAll { $0.id == r.id }
         MyLooksStore.save(myLooks)
     }
@@ -157,63 +292,194 @@ struct LooksView: View {
     @Environment(LibraryStore.self) private var store
     let asset: PhotoAsset
     @ViewState private var showImport = false
-    @AppStorage("lookTileSize") private var tileSize = 360.0
+    @ViewState private var renaming: String?
+    @ViewState private var newGroupName = ""
+    @FocusState private var searchFocused: Bool
+    @AppStorage("lookTileArea") private var tileSize = 210.0
+    @AppStorage("collapsedLookGroups") private var collapsedRaw = ""
+
+    private var collapsed: Set<String> { Set(collapsedRaw.split(separator: "\n").map(String.init)) }
+    private func toggleCollapsed(_ id: String) {
+        var c = collapsed
+        if c.contains(id) { c.remove(id) } else { c.insert(id) }
+        collapsedRaw = c.sorted().joined(separator: "\n")
+    }
 
     var body: some View {
         if let focus = store.lookFocus {
             LookDetailView(asset: asset, preset: focus)
                 .id(focus.id)   // a different look starts with fresh (uncustomised) settings
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("Creative Looks").font(.title2.bold())
-                        Text(asset.baseName).foregroundStyle(.secondary)
-                        Spacer()
-                        if let applied = asset.adjustments.look {
-                            Text("Applied: \(applied.name)").font(.callout)
-                            Button("Remove") { store.applyLook(nil, to: [asset]) }
-                        }
-                        HStack(spacing: 6) {
-                            Image(systemName: "square.grid.3x3").font(.caption).foregroundStyle(.secondary)
-                            Slider(value: $tileSize, in: 220...640).frame(width: 120).controlSize(.small)
-                            Image(systemName: "square.grid.2x2").foregroundStyle(.secondary)
-                        }
-                        .help("Tile size")
-                        Button { showImport = true } label: { Label("Import Recipes…", systemImage: "square.and.arrow.down.on.square") }
-                    }
-                    Text(asset.rawURL != nil
-                         ? "Rendered from the RAW with your edits. Click a look to enlarge, customise or save it as a JPEG."
-                         : "This shot has no RAW file. Looks are applied to the JPEG, so white balance changes are approximate.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    ForEach(store.lookGroups, id: \.0) { title, looks in
-                        Text(title).font(.headline)
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize), spacing: 16)], spacing: 18) {
-                            ForEach(looks) { r in
-                                LookTile(asset: asset, recipe: r, height: tileSize * 0.68)
-                                    .onTapGesture { store.lookFocus = r }
-                                    .contextMenu {
-                                        Button("Apply to Photo") { store.applyLook(r, to: [asset]) }
-                                        Button("Apply to Selected Groups") { store.applyLook(r, to: store.selectedGroupAssets) }
-                                        Button("Save JPEG…") { store.saveLookJPEG(asset, r) }
-                                        if !LookRecipe.builtIn.contains(r) {
-                                            Divider()
-                                            Button("Delete Look", role: .destructive) { store.deleteMyLook(r) }
-                                        }
-                                    }
-                            }
-                        }
-                    }
-                    Text("Sony's Creative Look processing is proprietary; these are Apixa's approximations built from the same controls the camera uses.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(20)
+            VStack(spacing: 0) {
+                header
+                chips
+                Divider()
+                grid
             }
             .sheet(isPresented: $showImport) { RecipeImportSheet().environment(store) }
+            .alert("Rename Group", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                TextField("Group name", text: $newGroupName)
+                Button("Rename") { if let r = renaming { store.renameLookGroup(r, to: newGroupName) }; renaming = nil }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            }
         }
     }
 
+    // MARK: Header
 
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Looks").font(.title2.bold())
+                Text(asset.rawURL != nil ? "\(asset.baseName) · from the RAW, with your edits" : "\(asset.baseName) · JPEG only, white balance is approximate")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if let applied = asset.adjustments.look {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor)
+                    Text(applied.name).lineLimit(1)
+                    Button { store.applyLook(nil, to: [asset]) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).help("Remove the look from this photo")
+                }
+                .font(.callout)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                .help("Look applied to this photo")
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search looks", text: Binding(get: { store.lookSearch }, set: { store.lookSearch = $0 }))
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                    .onChange(of: searchFocused) { _, f in store.isEditingText = f }
+                    .onExitCommand { store.lookSearch = ""; searchFocused = false }
+                if !store.lookSearch.isEmpty {
+                    Button { store.lookSearch = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .frame(width: 200)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+            HStack(spacing: 4) {
+                Image(systemName: "square.grid.3x3.fill").font(.caption2).foregroundStyle(.secondary)
+                Slider(value: $tileSize, in: 140...420).frame(width: 90).controlSize(.mini)
+                Image(systemName: "square.grid.2x2.fill").font(.caption).foregroundStyle(.secondary)
+            }
+            .help("Tile size")
+            Button { showImport = true } label: { Label("Import", systemImage: "square.and.arrow.down.on.square") }
+                .help("Import recipes from text (a blog post, Sony's site, a PDF you own)")
+        }
+        .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 10)
+    }
+
+    // MARK: Group chips
+
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                chip(id: "All", label: "All", symbol: "square.grid.2x2", count: Set(store.allLooks.map(\.id)).count)
+                ForEach(store.lookSections) { sec in
+                    chip(id: sec.id, label: sec.chip, symbol: sec.symbol, count: sec.looks.count)
+                }
+            }
+            .padding(.horizontal, 20).padding(.bottom, 10)
+        }
+    }
+
+    private func chip(id: String, label: String, symbol: String, count: Int) -> some View {
+        let on = store.lookFilter == id
+        return Button { store.lookFilter = id } label: {
+            HStack(spacing: 5) {
+                Image(systemName: symbol).font(.caption)
+                Text(label)
+                Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(on ? Color.white.opacity(0.85) : .secondary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .foregroundStyle(on ? Color.white : Color.primary)
+            .background(Capsule().fill(on ? Color.accentColor : Color.primary.opacity(0.07)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Grid
+
+    private var grid: some View {
+        let sections = store.visibleLookSections
+        let aspect = asset.thumbnail.map { $0.size.width / max(1, $0.size.height) } ?? 1.5
+        return ScrollView {
+            if sections.isEmpty {
+                ContentUnavailableView.search(text: store.lookSearch).padding(.top, 60)
+            }
+            LazyVStack(alignment: .leading, spacing: 14, pinnedViews: [.sectionHeaders]) {
+                ForEach(sections) { sec in
+                    let open = !collapsed.contains(sec.id) || !store.lookSearch.isEmpty
+                    Section {
+                        if open {
+                            // Same visual size for landscape and portrait photos: width follows the photo's shape.
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: tileSize * sqrt(aspect / 1.5) * 1.15), spacing: 14, alignment: .top)], alignment: .leading, spacing: 18) {
+                                ForEach(sec.looks) { r in
+                                    LookTile(asset: asset, recipe: r, aspect: aspect)
+                                        .onTapGesture { store.lookFocus = r }
+                                        .contextMenu { menu(r) }
+                                }
+                            }
+                            .padding(.horizontal, 20)
+                        }
+                    } header: {
+                        sectionHeader(sec, open: open)
+                    }
+                }
+                Text("Sony's Creative Look processing is proprietary; these are Apixa's renderings, learned from Sony's own output where available.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 20).padding(.vertical, 12)
+            }
+        }
+    }
+
+    private func sectionHeader(_ sec: LookSection, open: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "chevron.right")
+                .font(.caption.bold()).foregroundStyle(.secondary)
+                .rotationEffect(.degrees(open ? 90 : 0))
+            Image(systemName: sec.symbol).foregroundStyle(.secondary)
+            Text(sec.title).font(.headline)
+            Text("\(sec.looks.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
+            Text(sec.blurb).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                .help(sec.blurb)
+            Spacer(minLength: 8)
+            if sec.isMine {
+                Menu {
+                    Button("Rename Group…") { newGroupName = sec.id; renaming = sec.id }
+                } label: { Image(systemName: "ellipsis.circle") }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .background(.bar)
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.snappy(duration: 0.2)) { toggleCollapsed(sec.id) } }
+    }
+
+    @ViewBuilder private func menu(_ r: LookRecipe) -> some View {
+        Button("Apply to Photo") { store.applyLook(r, to: [asset]) }
+        Button("Apply to Selected Groups") { store.applyLook(r, to: store.selectedGroupAssets) }
+        Button("Save JPEG…") { store.saveLookJPEG(asset, r) }
+        Divider()
+        Button(store.favoriteLooks.contains(r.id) ? "Remove from Favorites" : "Add to Favorites") { store.toggleFavorite(r) }
+        if !LookRecipe.builtIn.contains(r) {
+            Menu("Move to Group") {
+                ForEach(store.myLookGroups.filter { $0 != r.group }, id: \.self) { g in
+                    Button(g) { store.moveMyLook(r, to: g) }
+                }
+            }
+            Divider()
+            Button("Delete Look", role: .destructive) { store.deleteMyLook(r) }
+        }
+    }
 }
 
 /// Rendered tiles, so returning to the grid (or to a photo) is instant.
@@ -233,36 +499,86 @@ struct LookTile: View {
     @Environment(LibraryStore.self) private var store
     let asset: PhotoAsset
     let recipe: LookRecipe
-    var height: Double = 240
+    var aspect: Double = 1.5
     var compact = false
     @ViewState private var image: NSImage?
+    @ViewState private var hovering = false
 
     private struct Key: Hashable { let id: UUID; let recipe: LookRecipe; let adj: Adjustments; let raw: Bool }
 
+    /// What kind of look this is, as a short badge: the Creative Look code, PP or Apple.
+    private var badge: String { recipe.isProfile ? "PP" : recipe.appleFilter != nil ? "Apple" : recipe.base.rawValue }
+
     var body: some View {
         let applied = asset.adjustments.look == recipe
-        VStack(alignment: .leading, spacing: 6) {
+        let fav = store.favoriteLooks.contains(recipe.id)
+        VStack(alignment: .leading, spacing: compact ? 3 : 7) {
             ZStack {
-                Rectangle().fill(Color.black.opacity(0.2))
+                Rectangle().fill(Color.primary.opacity(0.06))
                 if let image {
-                    Image(nsImage: image).resizable().scaledToFit()
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
                 } else if let t = asset.thumbnail {
-                    Image(nsImage: t).resizable().scaledToFit().opacity(0.35)
+                    Image(nsImage: t).resizable().aspectRatio(contentMode: .fill).opacity(0.35)
                     ProgressView().controlSize(.small)
                 }
             }
-            .frame(height: height)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(applied ? Color.accentColor : Color.clear, lineWidth: 3))
+            .aspectRatio(aspect, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipped()
+            .overlay(alignment: .topLeading) {
+                if !compact {
+                    Text(badge).font(.caption2.weight(.semibold).monospaced())
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(7)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if !compact && (fav || hovering) {
+                    Button { store.toggleFavorite(recipe) } label: {
+                        Image(systemName: fav ? "star.fill" : "star")
+                            .foregroundStyle(fav ? Color.yellow : Color.white)
+                            .padding(6)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain).padding(6)
+                    .help(fav ? "Remove from Favorites" : "Add to Favorites")
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !compact && hovering && !applied {
+                    Button { store.applyLook(recipe, to: [asset]) } label: { Label("Apply", systemImage: "checkmark") }
+                        .controlSize(.small).buttonStyle(.borderedProminent)
+                        .padding(8)
+                        .help("Apply this look to the photo")
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if applied && !compact {
+                    Label("Applied", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.accentColor))
+                        .padding(8)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: compact ? 6 : 10))
+            .overlay(RoundedRectangle(cornerRadius: compact ? 6 : 10)
+                .strokeBorder(applied ? Color.accentColor : (hovering ? Color.primary.opacity(0.25) : Color.clear), lineWidth: applied ? 2.5 : 1))
             if compact {
-                Text(recipe.name).font(.caption2).lineLimit(1)
+                Text(recipe.displayName).font(.caption2).lineLimit(1)
             } else {
-                Text(recipe.name).font(.callout.bold()).lineLimit(1)
-                Text(recipe.notes ?? recipe.settingsLine).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                if let c = recipe.credit { Text(c).font(.caption2).foregroundStyle(.tertiary).lineLimit(1) }
+                VStack(alignment: .leading, spacing: 2) {
+                    // Sony's own looks carry their code in the badge; show just the name.
+                    Text(recipe.displayName).font(.callout.weight(.semibold)).lineLimit(1)
+                    Text(recipe.notes ?? recipe.settingsLine).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .help(recipe.credit.map { "\(recipe.settingsLine)\n\($0)" } ?? recipe.settingsLine)
         .task(id: Key(id: asset.id, recipe: recipe, adj: asset.adjustments, raw: asset.rawURL != nil)) {
             var adj = asset.adjustments
             adj.look = recipe
@@ -297,13 +613,26 @@ struct LookDetailView: View {
         let r = draft ?? preset
         TrailingPanelLayout(key: PanelWidth.looks.key, defaultWidth: PanelWidth.looks.default, minWidth: PanelWidth.looks.range.lowerBound, maxWidth: PanelWidth.looks.range.upperBound, show: store.showInspector) {
             VStack(spacing: 0) {
-                HStack {
+                HStack(spacing: 10) {
                     Button { store.lookFocus = nil } label: { Label("All Looks", systemImage: "chevron.left") }
                         .keyboardShortcut(.cancelAction)
                     Text(r.name).font(.headline)
+                    Text(LookSection(id: preset.group, looks: []).chip)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                    Button { store.toggleFavorite(preset) } label: {
+                        Image(systemName: store.favoriteLooks.contains(preset.id) ? "star.fill" : "star")
+                            .foregroundStyle(store.favoriteLooks.contains(preset.id) ? Color.yellow : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(store.favoriteLooks.contains(preset.id) ? "Remove from Favorites" : "Add to Favorites")
                     Spacer()
+                    if asset.adjustments.look == preset {
+                        Label("Applied", systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(Color.accentColor)
+                    }
                 }
-                .padding(.horizontal, 10).padding(.vertical, 6)
+                .padding(.horizontal, 12).padding(.vertical, 7)
                 PreviewBar(asset: asset)
                 Divider()
                 PreviewView(asset: asset, chrome: true, lookOverride: r)
@@ -315,11 +644,21 @@ struct LookDetailView: View {
         } panel: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(r.name).font(.title3.bold())
-                    if let n = r.notes { Text(n).font(.callout).foregroundStyle(.secondary) }
-                    if let c = r.credit { Text(c).font(.caption).foregroundStyle(.tertiary) }
-                    Text("Camera: " + r.settingsLine).font(.caption.monospaced()).foregroundStyle(.secondary)
-                        .help("What you'd dial into a Sony body for this recipe")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(LookSection(id: preset.group, looks: []).title.uppercased())
+                            .font(.caption2.weight(.semibold)).tracking(0.6).foregroundStyle(.secondary)
+                        Text(r.name).font(.title3.bold())
+                        if let n = r.notes { Text(n).font(.callout).foregroundStyle(.secondary) }
+                        if let c = r.credit { Text(c).font(.caption).foregroundStyle(.tertiary) }
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("In camera").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(r.settingsLine).font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                    .help("What you'd dial into a Sony body for this recipe")
 
                     Button { store.applyLook(r, to: [asset]); store.lookFocus = nil; store.mainMode = .photo } label: {
                         Label("Use This Look", systemImage: "checkmark.circle").frame(maxWidth: .infinity)
@@ -553,32 +892,43 @@ struct ProfileEditor: View {
     }
 }
 
-/// Every look as a small thumbnail under the enlarged photo; click to switch (or use ← →).
+/// The current group's looks as small thumbnails under the enlarged photo; click to switch (or use ← →).
 struct LookStrip: View {
     @Environment(LibraryStore.self) private var store
     let asset: PhotoAsset
     let current: LookRecipe
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 8) {
-                    ForEach(store.allLooks) { r in
-                        LookTile(asset: asset, recipe: r, height: 74, compact: true)
-                            .frame(width: 112)
-                            .overlay(RoundedRectangle(cornerRadius: 8)
-                                .stroke(r.id == current.id ? Color.accentColor : Color.clear, lineWidth: 3)
-                                .padding(.bottom, 18))
-                            .id(r.id)
-                            .onTapGesture { store.lookFocus = r }
-                    }
-                }
-                .padding(.horizontal, 10).padding(.vertical, 8)
+        let looks = store.stripLooks(for: current)
+        let aspect = asset.thumbnail.map { $0.size.width / max(1, $0.size.height) } ?? 1.5
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(LookSection(id: current.group, looks: []).chip).font(.caption.weight(.semibold))
+                Text("\((looks.firstIndex { $0.id == current.id } ?? 0) + 1) of \(looks.count)")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
-            .frame(height: 112)
-            .onAppear { proxy.scrollTo(current.id, anchor: .center) }
-            .onChange(of: current.id) { withAnimation { proxy.scrollTo(current.id, anchor: .center) } }
+            .frame(width: 92, alignment: .leading)
+            .padding(.leading, 12)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 8) {
+                        ForEach(looks) { r in
+                            LookTile(asset: asset, recipe: r, aspect: aspect, compact: true)
+                                .frame(width: 74 * min(1.6, max(0.7, aspect)))
+                                .overlay(RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(r.id == current.id ? Color.accentColor : Color.clear, lineWidth: 2.5)
+                                    .padding(.bottom, 16))
+                                .id(r.id)
+                                .onTapGesture { store.lookFocus = r }
+                        }
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                }
+                .onAppear { proxy.scrollTo(current.id, anchor: .center) }
+                .onChange(of: current.id) { withAnimation { proxy.scrollTo(current.id, anchor: .center) } }
+            }
         }
-        .help("← → previous / next look · ↑ ↓ previous / next photo")
+        .frame(height: 104)
+        .help("← → previous / next look in this group · ↑ ↓ previous / next photo")
     }
 }

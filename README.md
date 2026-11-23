@@ -15,7 +15,7 @@ Built with SwiftUI, Vision and Core Image's RAW 9 decoder. No third-party depend
 
 ## Build
 
-Requires **macOS 27** and Xcode 27 or its Command Line Tools (`xcode-select --install`).
+Requires **macOS 27**, Xcode 27 (or its Command Line Tools) and the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`), which compiles the Core Image kernels in `Kernels/`.
 
 ```bash
 ./build.sh

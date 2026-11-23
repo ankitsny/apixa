@@ -47,10 +47,21 @@ final class LibraryStore {
     var cropMode = false
     var mainMode = MainMode.photo
     var lookFocus: LookRecipe? = nil
+    /// Looks grid: the group chip in view ("All" or a section id) and the search text.
+    var lookFilter = "All"
+    var lookSearch = ""
+    /// Starred looks (by id), kept across launches.
+    var favoriteLooks: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "favoriteLooks") ?? []) {
+        didSet { UserDefaults.standard.set(Array(favoriteLooks).sorted(), forKey: "favoriteLooks") }
+    }
     var myLooks: [LookRecipe] = MyLooksStore.load()
     var locationFilter: Set<UUID>? = nil
     var compareMode = CompareMode.off
     var showClipping = false
+    /// Show highlights above SDR white with real brightness on HDR-capable screens (XDR).
+    var hdrView: Bool = UserDefaults.standard.object(forKey: "hdrView") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(hdrView, forKey: "hdrView") }
+    }
     var showInspector = UserDefaults.standard.object(forKey: "showInspector") as? Bool ?? true {
         didSet { if Self.persistSettings { UserDefaults.standard.set(showInspector, forKey: "showInspector") } }
     }
@@ -83,7 +94,7 @@ final class LibraryStore {
 
     /// Self-test runs never change the user's saved preferences.
     static let persistSettings = !CommandLine.arguments.contains {
-        ["--selftest", "--developtest", "--statetest", "--trashtest", "--metatest", "--perftest", "--stackdump", "--facedump", "--looktest", "--importlooks", "--darktest", "--nrtest", "--lookcompare", "--uidemo", "--measuretest", "--scopetest", "--autoundo", "--autotest", "--auditdump", "--sonyfit", "--refexport", "--refcompare", "--lookfit", "--camfit", "--handcheck", "--matchtest", "--basecheck"].contains($0)
+        ["--selftest", "--developtest", "--statetest", "--trashtest", "--metatest", "--perftest", "--stackdump", "--facedump", "--looktest", "--importlooks", "--darktest", "--nrtest", "--lookcompare", "--uidemo", "--measuretest", "--scopetest", "--autoundo", "--autotest", "--auditdump", "--sonyfit", "--refexport", "--refcompare", "--lookfit", "--camfit", "--handcheck", "--matchtest", "--basecheck", "--rendertiff", "--chartfit", "--hdrtest"].contains($0)
     }
 
     private static func pref(_ key: String, _ def: Double) -> Double {
